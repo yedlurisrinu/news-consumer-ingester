@@ -96,3 +96,75 @@ PUT news_articles
 }
 
 Creating Alias and settings is pending
+
+
+POST _reindex?wait_for_completion=false
+{
+    "source": {
+        "index":"news_articles"
+    },
+    "dest": {
+        "index":"news_articles_v1"
+    }
+}
+
+GET _tasks/6wH6JkbxRLu-cJK4i1VhIA:3256250
+GET news_articles_v1/_search
+GET news_articles_v1/_search
+{
+  "size": 1,
+  "_source": ["content","_inference_fields"]
+}
+GET news_articles_v1/_count
+GET _cat/indices?v&h=health,status,index,pri,rep,docs.count,dataset.size
+POST _aliases
+{
+    "actions": [
+      {
+        "add": {
+          "index": "news_articles_v1",
+          "alias": "news_articles"
+        }
+      }
+    ]
+}
+
+
+GET /news_articles_v1/_search
+{
+  "query": {
+    "semantic": {
+      "field": "content.semantic",
+      "query": "latest news in food"
+    }
+  }
+}
+
+GET /news_articles/_search
+{
+  "retriever": {
+    "rrf": {
+      "retrievers": [
+        {
+          "standard": {
+            "query": {
+              "match": {
+                "content": "lastest news in technology food"
+              }
+            }
+          }
+        },
+        {
+          "standard": {
+            "query": {
+              "semantic": {
+                "field": "content.semantic",
+                "query": "latest news in technology food"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

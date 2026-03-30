@@ -15,7 +15,7 @@ services:
       - vault-network
       - infra-network
     healthcheck:
-      test: ["CMD-SHELL", "pgrep -f 'python.*main.py' > /dev/null" ]
+      test: ["CMD-SHELL", "cat /proc/1/status | grep -q 'State:.*running\\|State:.*sleeping' || exit 1" ]
       interval: 300s
       timeout: 10s
       retries: 3

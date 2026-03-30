@@ -16,6 +16,22 @@ can start here.
 
 ## Demo
 
+> Demo assets (recordings, screenshots, and step-by-step walkthrough scripts) are located in the [`demo/`](./demo/) folder.
+
+The demo folder will contain:
+
+| File                                                           | Description                                                      |
+|----------------------------------------------------------------|------------------------------------------------------------------|
+| `demo/elasticsearch-project_page.png`                          | Main page that describes storage, cluster information            |
+| `demo/elasticsearch_document_count.png`                        | Number of new articles indexes in the elasticseach index         |
+| `demo/elasticsearch_inference_field_query_with_embeddings.png` | Searching index to see text and embedding content                |
+| `demo/elasticsearch_reciprocal_rank_fusion_query_results.png`  | Executing reciprocal rank fusion query to fetch relavent result  |
+| `demo/embeddings_inference_endpoint.png`                       | Verifying inference end point settings and validatin it          |
+| `demo/elastic_search_nested_doc_count_data_size.png`           | Total number of documents, including nested and total index size |
+| `demo/elastic_consumption_units.png`                           | Total Elastic Consumtion units for the complete project          |
+| `demo/services_running_on_locale_docker.png`                   | Service running on local docker instance                         |
+| `demo/scheduler_ingester_pipeline_logs.png`                    | Consumer and ingester pipeline logs                              |
+
 ### Chat UI — News Search & Summary
 ![Chat UI Screenshot](demo/chat-ui-screenshot.png)
 
@@ -153,16 +169,16 @@ PUT news_articles
 
 ### 3. Field reference
 
-| Field          | Type          | Notes                                              |
-|----------------|---------------|----------------------------------------------------|
-| `article_id`   | `keyword`     | MD5 hash from producer — used as `_id` (dedup key)|
-| `title`        | `text`        | English analyser for full-text search              |
-| `content`      | `text`        | English analyser + semantic sub-field for vectors  |
-| `content.semantic` | `semantic_text` | Auto-vectorised via inference endpoint         |
-| `link`         | `keyword`     | Not indexed — stored only                         |
-| `published_at` | `date`        | ISO-8601 or epoch millis                           |
-| `fetched_at`   | `date`        | ISO-8601 or epoch millis                           |
-| `source`       | `keyword`     | Feed source name (e.g. ESPN, CBS News)             |
+| Field              | Type            | Notes                                               |
+|--------------------|-----------------|-----------------------------------------------------|
+| `article_id`       | `keyword`       | MD5 hash from producer — used as `_id` (dedup key)  |
+| `title`            | `text`          | English analyser for full-text search               |
+| `content`          | `text`          | English analyser + semantic sub-field for vectors   |
+| `content.semantic` | `semantic_text` | Auto-vectorised via inference endpoint              |
+| `link`             | `keyword`       | Not indexed — stored only                           |
+| `published_at`     | `date`          | ISO-8601 or epoch millis                            |
+| `fetched_at`       | `date`          | ISO-8601 or epoch millis                            |
+| `source`           | `keyword`       | Feed source name (e.g. ESPN, CBS News)              |
 
 > **Serverless note:** `number_of_shards` and `number_of_replicas` are not available in serverless mode — omit them from the settings block when targeting a serverless project.
 
@@ -243,14 +259,14 @@ tests/
 
 ## Key Design Decisions
 
-| Problem                        | Solution                                                    |
-|--------------------------------|-------------------------------------------------------------|
-| Duplicate articles             | Explicit `_id` from MD5 hash — ES `index` op is idempotent |
-| Partial Kafka batches          | `batch_size` threshold with graceful last-batch handling    |
-| ES certificate errors          | Separate HTTP/transport certs with SANs                    |
-| Cloud connection timeouts      | `http_compress=True`, dynamic `chunk_size`, retry backoff   |
-| Large article content          | HTTP fetch capped at 5 000 chars; BeautifulSoup noise strip |
-| Secrets management             | HashiCorp Vault — no plaintext credentials in config       |
+| Problem                        | Solution                                                     |
+|--------------------------------|--------------------------------------------------------------|
+| Duplicate articles             | Explicit `_id` from MD5 hash — ES `index` op is idempotent   |
+| Partial Kafka batches          | `batch_size` threshold with graceful last-batch handling     |
+| ES certificate errors          | Separate HTTP/transport certs with SANs                      |
+| Cloud connection timeouts      | `http_compress=True`, dynamic `chunk_size`, retry backoff    |
+| Large article content          | HTTP fetch capped at 5 000 chars; BeautifulSoup noise strip  |
+| Secrets management             | HashiCorp Vault — no plaintext credentials in config         |
 
 ---
 
