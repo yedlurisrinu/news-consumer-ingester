@@ -1,0 +1,5 @@
+[run]
+omit = src/main.py
+
+[report]
+omit = src/main.py
