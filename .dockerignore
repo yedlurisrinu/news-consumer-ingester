@@ -16,3 +16,4 @@ build/
 start.sh
 README.md
 .github/
+.venv

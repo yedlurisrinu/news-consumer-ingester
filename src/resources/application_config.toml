@@ -1,0 +1,12 @@
+# send heartbeat every 3s,
+# 30s before consumer considered dead, # 5 mins max between polls
+# Connection settings
+# wait 1s before reconnect
+# max 10s between reconnects
+#"sasl.mechanisms"="PLAIN",
+KAFKA={"security.protocol"="PLAINTEXT","bootstrap.servers"="kafka:9092","group.id"="news_ai_summary_group","auto.offset.reset"="latest","enable.auto.commit"="False","session.timeout.ms"=45000,"heartbeat.interval.ms"=3000,"max.poll.interval.ms"=300000,"socket.keepalive.enable"="True","reconnect.backoff.ms"=1000,"reconnect.backoff.max.ms"=10000}
+# Connection pooling for cloud
+ELASTIC={"request_timeout"=60,"retry_on_timeout"="True","max_retries"=3,"http_compress"="True","connections_per_node"=10}
+TOPIC_NAME ="news_ai_pipeline_dev_t_0"
+INGESTER_BATCH_SIZE = 50
+URL="http://elasticsearch:9200"

@@ -49,8 +49,10 @@ def processor(mock_consumer, monkeypatch):
     monkeypatch.setenv("CONFLUENT.client.id", "test-client")
 
     _, consumer_instance = mock_consumer
-    config = {"security.protocol": "SASL_SSL"}
-    proc = BulkMessageProcessor(config, "test-topic", batch_size=3)
+    with patch('consumer.bulk_message_processor.get_config') as mock_config:
+        mock_config.return_value = {'security.protocol': 'PLAINTEXT', 'bootstrap.servers': 'kafka:9092', 'group.id': 'news_ai_summary_group', 'auto.offset.reset': 'latest', 'enable.auto.commit': 'False', 
+                                    'session.timeout.ms': 45000, 'heartbeat.interval.ms': 3000, 'max.poll.interval.ms': 300000, 'socket.keepalive.enable': 'True', 'reconnect.backoff.ms': 1000, 'reconnect.backoff.max.ms': 10000}
+        proc = BulkMessageProcessor("test-topic", batch_size=3)
     return proc, consumer_instance
 
 
@@ -64,22 +66,6 @@ class TestBulkMessageProcessorInit:
     def test_sets_batch_size(self, processor):
         proc, _ = processor
         assert proc.batch_size == 3
-
-    def test_merges_env_vars_into_config(self, mock_consumer, monkeypatch):
-        monkeypatch.setenv("CONFLUENT.bootstrap.servers", "broker:9092")
-        monkeypatch.setenv("CONFLUENT.sasl.username", "myuser")
-        monkeypatch.setenv("CONFLUENT.sasl.password", "mypass")
-        monkeypatch.setenv("CONFLUENT.client.id", "myid")
-
-        mock_cls, _ = mock_consumer
-        BulkMessageProcessor({"security.protocol": "SASL_SSL"}, "topic")
-
-        call_args = mock_cls.call_args[0][0]
-        assert call_args["bootstrap.servers"] == "broker:9092"
-        assert call_args["sasl.username"] == "myuser"
-        assert call_args["sasl.password"] == "mypass"
-        assert call_args["client.id"] == "myid"
-
 
 # ── poll_batch tests ───────────────────────────────────────────────────────
 

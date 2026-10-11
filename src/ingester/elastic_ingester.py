@@ -4,7 +4,7 @@ from functools import lru_cache
 from elasticsearch import Elasticsearch
 
 from config.elastic_setup import get_elastic_instance
-from config.settings import INGESTER_BATCH_SIZE
+from config.application_config import get_config 
 from pathlib import Path
 from dotenv import load_dotenv
 import logging
@@ -81,21 +81,21 @@ def bulk_index_articles(articles: list[dict]):
     total_success = 0
     total_failed  = 0
 
-    for batch in batch_articles(articles, INGESTER_BATCH_SIZE):
+    for batch in batch_articles(articles, get_config('INGESTER_BATCH_SIZE')):
         try:
             success, errors = bulk_index(batch, INDEX_NAME)
             total_success += success
             total_failed  += len(errors)
-
             if errors:
                 for error in errors:
                     logger.info(f"[Indexer] Failed to index: {error}")
             logger.info(f"[Indexer] Batch indexed — success: {success} failed: {len(errors)}")
         except Exception as e:
             logger.info(f"[Indexer] Bulk request failed: {e}")
+            # TODO need to whitelist Transient errors and non-recoverable errors
     logger.info(f"[Indexer] Complete — total success: {total_success} total failed: {total_failed}")
 
-if __name__ == "__main__":
+if __name__ == "__main__": # pragma: no cover
     def load():
         elastic_articles = []
         # TODO replace this file path

@@ -4,19 +4,21 @@ import os
 from confluent_kafka import Consumer, KafkaException
 import logging
 from ingester import elastic_ingester
+from config.application_config import get_config
 
 logger = logging.getLogger(__name__)
 
 class BulkMessageProcessor:
-    def __init__(self, config, topic, batch_size=100):
+    def __init__(self, topic, batch_size=100):
         self.batch_size = batch_size
-        self.consumer = Consumer({**config,
-                                  'bootstrap.servers': os.getenv('CONFLUENT.bootstrap.servers'),
-                                  'sasl.username': os.getenv('CONFLUENT.sasl.username'),
-                                  'sasl.password': os.getenv('CONFLUENT.sasl.password'),
-                                  'client.id': os.getenv('CONFLUENT.client.id')})
-
+        self.consumer = Consumer(**get_config('KAFKA'))
         self.consumer.subscribe([topic])
+
+# Not required until we move to AWS could
+# 'sasl.username': os.getenv('CONFLUENT.sasl.username'),
+# 'sasl.password': os.getenv('CONFLUENT.sasl.password'),
+# 'client.id': os.getenv('CONFLUENT.client.id')
+
 
     def poll_batch(self):
         """Poll exactly batch_size messages"""
@@ -42,7 +44,7 @@ class BulkMessageProcessor:
                 batch = self.poll_batch()
                 if not batch:
                     continue
-
+                
                 # Step 2 — Process batch
                 elastic_ingester.bulk_index_articles(batch)
 

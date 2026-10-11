@@ -184,9 +184,10 @@ class TestBulkIndexArticles:
 
     def test_indexes_single_batch(self):
         articles = [_make_article(f"a{i}") for i in range(5)]
-
-        with patch("ingester.elastic_ingester.bulk_index", return_value=(5, [])) as mock_bulk_index:
-            bulk_index_articles(articles)
+        with patch("ingester.elastic_ingester.bulk_index", return_value=(5, [])) as mock_bulk_index,\
+             patch('ingester.elastic_ingester.get_config') as mock_config:
+                mock_config.return_value = 50
+                bulk_index_articles(articles)
 
         mock_bulk_index.assert_called_once()
 
@@ -194,7 +195,9 @@ class TestBulkIndexArticles:
         # INGESTER_BATCH_SIZE is 50; send 120 articles
         articles = [_make_article(f"a{i}") for i in range(120)]
 
-        with patch("ingester.elastic_ingester.bulk_index", return_value=(50, [])) as mock_bulk_index:
+        with patch("ingester.elastic_ingester.bulk_index", return_value=(50, [])) as mock_bulk_index,\
+            patch('ingester.elastic_ingester.get_config') as mock_config:
+            mock_config.return_value = 50
             bulk_index_articles(articles)
 
         assert mock_bulk_index.call_count == 3  # 50 + 50 + 20
@@ -203,7 +206,9 @@ class TestBulkIndexArticles:
         articles = [_make_article(f"a{i}") for i in range(100)]
 
         with patch("ingester.elastic_ingester.bulk_index", return_value=(50, [])), \
-             patch("ingester.elastic_ingester.logger") as mock_logger:
+            patch("ingester.elastic_ingester.logger") as mock_logger,\
+            patch('ingester.elastic_ingester.get_config') as mock_config:
+            mock_config.return_value = 50
             bulk_index_articles(articles)
 
         # Final summary log contains totals
@@ -221,8 +226,10 @@ class TestBulkIndexArticles:
                 raise Exception("ES connection error")
             return (len(batch), [])
 
-        with patch("ingester.elastic_ingester.bulk_index", side_effect=side_effect):
-            # Should not raise — logs the error and continues
-            bulk_index_articles(articles)
+        with patch("ingester.elastic_ingester.bulk_index", side_effect=side_effect),\
+             patch('ingester.elastic_ingester.get_config') as mock_config:
+             mock_config.return_value = 50
+             #Should not raise — logs the error and continues
+             bulk_index_articles(articles)
 
         assert call_count == 2

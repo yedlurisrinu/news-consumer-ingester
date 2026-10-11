@@ -9,16 +9,17 @@ The main module that loads config, calling common
 import asyncio
 
 from pathlib import Path
-from py_commons_per.logging_setup import setup_logging
-from py_commons_per.vault_secret_loader import load_secrets
-from config.confluent_config import read_config
-from config import settings
+from config.logging_setup import setup_logging
+from config.vault_secrets import load_secrets
+from config.application_config import read_config
+from config.application_config import get_config
 from consumer.bulk_message_processor import BulkMessageProcessor
 
 def main():
     setup_logging()
     load_secrets()
-    bulk_message_processor = BulkMessageProcessor(read_config(str(Path(__file__).parent)+"/resources/confluent-client.properties"), settings.TOPIC_NAME)
+    read_config(str(Path(__file__).parent)+"/resources/application_config.toml")
+    bulk_message_processor = BulkMessageProcessor(get_config('TOPIC_NAME'), get_config('INGESTER_BATCH_SIZE'))
     asyncio.run(bulk_message_processor.run())
 
 main()
