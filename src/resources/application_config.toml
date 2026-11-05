@@ -1,0 +1,28 @@
+# send heartbeat every 3s,
+# 45s before consumer considered dead (session.timeout.ms), 10 mins max between polls (max.poll.interval.ms)
+# Connection settings
+# wait 1s before reconnect
+# max 10s between reconnects
+#"sasl.mechanisms"="PLAIN",
+# max.poll.interval.ms (10 min) should exceed the worst-case batch. Two retry loops nest: the bulk
+# helper retries 429s (BULK.max_retries 3 -> 4 rounds, backoff 2+4+8 s) and inside each round the ES
+# client retries timeouts (ELASTIC.max_retries 1 -> 2 attempts x request_timeout 60 s). Worst case:
+# fetch budget 120 s + 4 x 2 x 60 s + 14 s = ~614 s (only if ES both stalls and throttles). Keep the
+# Docker HEALTHCHECK heartbeat threshold (Dockerfile, 600 s) in step with it.
+KAFKA={"security.protocol"="PLAINTEXT","bootstrap.servers"="kafka:9092","group.id"="news_ai_summary_group","auto.offset.reset"="latest","enable.auto.commit"=false,"session.timeout.ms"=45000,"heartbeat.interval.ms"=3000,"max.poll.interval.ms"=600000,"socket.keepalive.enable"=true,"reconnect.backoff.ms"=1000,"reconnect.backoff.max.ms"=10000}
+# Connection pooling for cloud
+ELASTIC={"request_timeout"=60,"retry_on_timeout"=true,"max_retries"=1,"http_compress"=true,"connections_per_node"=10}
+TOPIC_NAME ="news_ai_pipeline_dev_t_0"
+INGESTER_BATCH_SIZE = 50
+URL="http://elasticsearch:9200"
+ES_INDEX = "news_articles"
+# Elasticsearch bulk helper tuning: chunk_size matches Kafka batch size, backoff/timeout in seconds
+BULK={"chunk_size"=50,"max_retries"=3,"initial_backoff"=2,"max_backoff"=60,"request_timeout"=60}
+# Per-document index errors that mean "every document would fail" (systematic) or "retry may work"
+# (transient): the batch is not committed. Any 5xx also blocks. Other errors are document-level:
+# logged and committed past.
+INDEX_ERRORS={"blocking_statuses"=[401, 403, 404, 429],"blocking_types"=["strict_dynamic_mapping_exception","index_not_found_exception","security_exception","cluster_block_exception"]}
+# Kafka consumer poll timeout in seconds
+POLL_TIMEOUT_SECONDS = 1.0
+# Full article fetcher: per-request timeout and overall batch fetch budget in seconds
+CONTENT_FEED={"user_agent"="Mozilla/5.0","timeout"=10,"max_content_chars"=5000,"max_workers"=8,"fetch_budget_seconds"=120,"ignore_domains"=["youtube.com","twitter.com","facebook.com","instagram.com"]}

@@ -1,5 +1,15 @@
 [run]
+source = src
 omit = src/main.py
 
 [report]
 omit = src/main.py
+# src/ has no __init__.py files: without this, modules no test imports are left out of the report
+include_namespace_packages = True
+show_missing = True
+skip_empty = True
+fail_under = 90
+# compare to 2 decimals: with the default 0, a total of 89.5-89.99 rounds up to 90 and passes
+precision = 2
+exclude_also =
+    if __name__ == .__main__.:

@@ -1,24 +1,23 @@
-
-"""
-The main module that loads config, calling common
- module for setup logging and loading secrets from
- vault server that is running in docker on localhost.
- After successful completion it will submit an async process
- to consume messages from kafka and processing into Elasticsearch.
-"""
-import asyncio
+"""Entry point: set up logging, load secrets from Vault and the TOML config, then run the
+Kafka consumer loop (poll a batch → index into Elasticsearch → commit) until SIGTERM."""
 
 from pathlib import Path
-from py_commons_per.logging_setup import setup_logging
-from py_commons_per.vault_secret_loader import load_secrets
-from config.confluent_config import read_config
-from config import settings
+
+from config.application_config import get_config, read_config
+from config.logging_setup import setup_logging
+from config.vault_secrets import load_secrets
 from consumer.bulk_message_processor import BulkMessageProcessor
 
-def main():
+
+def main() -> None:
     setup_logging()
     load_secrets()
-    bulk_message_processor = BulkMessageProcessor(read_config(str(Path(__file__).parent)+"/resources/confluent-client.properties"), settings.TOPIC_NAME)
-    asyncio.run(bulk_message_processor.run())
+    read_config(str(Path(__file__).parent) + "/resources/application_config.toml")
+    bulk_message_processor = BulkMessageProcessor(
+        get_config("TOPIC_NAME"), get_config("INGESTER_BATCH_SIZE")
+    )
+    bulk_message_processor.run()
 
-main()
+
+if __name__ == "__main__":
+    main()

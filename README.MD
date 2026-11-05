@@ -1,300 +1,225 @@
-# News Consumer Ingester
+# news-consumer-ingester
 
-[![Build Status](https://github.com/username/repo/actions/workflows/main.yml/badge.svg)](https://github.com//repo/actions)
+## Purpose
 
-![License](https://img.shields.io/badge/license-MIT-blue)
+A long-running Python worker that consumes news articles from Kafka in batches, fetches each
+article's full page text, and bulk-indexes the result into the Elasticsearch index
+`news_articles`. Kafka offsets are committed only after a batch has been indexed (or after a
+poll in which every message was skipped). It serves no HTTP.
 
-The project is part of a multi-agent RAG application. It consumes news articles published to Confluent Kafka by 
-the [news-fetch-scheduler](../news_fetch_scheduler) and ingests them — along with their full content and vector 
-embeddings — into an Elasticsearch cloud cluster. Anyone looking to understand an end-to-end RAG ingestion pipeline 
-can start here.
----
+Flow (`src/main.py`): `setup_logging()` → `load_secrets()` (Vault → env) →
+`read_config("src/resources/application_config.toml")` →
+`BulkMessageProcessor(TOPIC_NAME, INGESTER_BATCH_SIZE).run()`.
 
-## TODOs
-- CI pipeline completion (no deploy job).
----
+| Step | Code | What happens |
+|---|---|---|
+| Poll | `consumer/bulk_message_processor.py` `poll_batch()` | Polls up to `INGESTER_BATCH_SIZE` (50) messages, each poll waiting `POLL_TIMEOUT_SECONDS` (1.0); stops early when no message is waiting. A message is skipped with an ERROR log (partition and offset, no payload) when it has no key or value, the key or value is not valid UTF-8, the value is invalid JSON or not a JSON object, or a required field (`title`, `summary`, `link`, `published_at`, `fetched_at`, `source`) is missing. Partition EOF and retriable Kafka errors log a warning; other Kafka errors raise `KafkaException`. The message key is stored as `article_id`. |
+| Fetch content | `contentfeed/content_feed.py` | For every article in the batch, concurrently (`ThreadPoolExecutor`, `max_workers` 8) GET the `link` within an overall `fetch_budget_seconds` (120). Only `http`/`https` URLs; hosts in `ignore_domains` (matched on hostname or subdomain) are skipped. One shared httpx client (`timeout` 10, `user_agent`, follows redirects). BeautifulSoup strips `nav`, `footer`, `aside`, `script`, `style`, `iframe`, `form`, `ads`, takes `<article>`, `<main>`, a `div` whose class contains "article", or `<body>`, and keeps the first `max_content_chars` (5000) characters. Empty result, error or budget overrun → the article's `summary` is used instead. |
+| Index | `ingester/elastic_ingester.py` | `elasticsearch.helpers.bulk` with `_op_type: index`, `_index: ES_INDEX`, `_id: article_id`, so re-indexing the same article overwrites it (idempotent). `BULK` settings from config, `raise_on_error=False`: per-item failures are logged at ERROR (`_id`, status, error type) and then classified by `_is_blocking` against `INDEX_ERRORS`. A **blocking** error (status 401, 403, 404, 429 or any 5xx, or type `strict_dynamic_mapping_exception`, `index_not_found_exception`, `security_exception`, `cluster_block_exception`) is systematic or transient, so `BatchRejected` is raised and the batch is not committed. Every other error is document-level: logged and committed past. A failure of the bulk request itself (including client creation) is logged as `[Indexer] Bulk request failed` and re-raised. |
+| Commit | `bulk_message_processor.py` `run()` | `consumer.commit(asynchronous=False)` after indexing returns; it commits the current position of all assigned partitions, so skipped messages in the batch are covered too. A poll in which every message was skipped (`last_poll_consumed` > 0, empty batch) is committed immediately; an empty poll commits nothing. If indexing raised, nothing is committed. |
 
-## Demo
+Each loop pass touches `/tmp/heartbeat` (Docker HEALTHCHECK). Any exception from indexing or
+commit (including `BatchRejected`) is not caught: `run()` closes the consumer and the process
+exits, and Docker restarts it (`restart: unless-stopped`); the uncommitted batch is re-read.
+SIGTERM and SIGINT set a stop flag: the loop stops after the current batch, then closes the
+consumer. Under `docker stop` that only works within Docker's 10 s stop grace period; a longer
+batch is killed, and its uncommitted messages are re-read on the next start (idempotent by `_id`).
 
-> Demo assets (recordings, screenshots, and step-by-step walkthrough scripts) are located in the [`demo/`](./demo/) folder.
+**Indexed document** (`_source`): `article_id`, `title`, `content` (fetched text or summary),
+`link`, `published_at`, `fetched_at`, `source`. The Kafka `summary` field is not stored
+separately.
 
-The demo folder will contain:
+**Index mapping** (from the console notes in `src/resources/elastic_schema.MD`; the index is not
+created by this repo's code):
 
-| File                                                           | Description                                                      |
-|----------------------------------------------------------------|------------------------------------------------------------------|
-| `demo/elasticsearch-project_page.png`                          | Main page that describes storage, cluster information            |
-| `demo/elasticsearch_document_count.png`                        | Number of new articles indexes in the elasticseach index         |
-| `demo/elasticsearch_inference_field_query_with_embeddings.png` | Searching index to see text and embedding content                |
-| `demo/elasticsearch_reciprocal_rank_fusion_query_results.png`  | Executing reciprocal rank fusion query to fetch relavent result  |
-| `demo/embeddings_inference_endpoint.png`                       | Verifying inference end point settings and validatin it          |
-| `demo/elastic_search_nested_doc_count_data_size.png`           | Total number of documents, including nested and total index size |
-| `demo/elastic_consumption_units.png`                           | Total Elastic Consumtion units for the complete project          |
-| `demo/services_running_on_locale_docker.png`                   | Service running on local docker instance                         |
-| `demo/scheduler_ingester_pipeline_logs.png`                    | Consumer and ingester pipeline logs                              |
+| Field | Type | Notes |
+|---|---|---|
+| `article_id` | `keyword` | MD5 hash from the scheduler; also the `_id` |
+| `title` | `text` | `english` analyzer |
+| `content` | `text` | `english` analyzer |
+| `content.semantic` | `semantic_text` | `inference_id: news-embedding-endpoint` (model `.multilingual-e5-small_linux-x86_64`) |
+| `link` | `keyword` | `index: false` (stored, not searchable) |
+| `published_at`, `fetched_at` | `date` | `strict_date_optional_time\|\|epoch_millis` |
+| `source` | `keyword` | Feed source name |
 
-### Chat UI — News Search & Summary
-![Chat UI Screenshot](demo/chat-ui-screenshot.png)
+Settings: `"dynamic": "strict"` (unknown fields are rejected), `refresh_interval: 30s`. The notes
+also reindex `news_articles` into `news_articles_v1` and add the alias `news_articles` →
+`news_articles_v1`, and include a "serverless mode" error from an Elastic Cloud project. Which of
+these (index vs alias, inference endpoint) exists on the local Elasticsearch is UNVERIFIED.
 
-### End-to-End Pipeline Walkthrough
-<video src="demo/pipeline-demo.webm" controls width="800">
-  Your browser does not support the video tag.
-</video>
+## Where it fits
 
-> **Note:** Demo assets are stored in the `demo/` folder. To add your own, drop `.png` screenshots and `.webm` screen recordings there and update the paths above.
+```mermaid
+flowchart LR
+  subgraph ext[External]
+    sites[Article websites]
+  end
 
----
+  subgraph apps[Applications]
+    sched[news-fetch-scheduler]
+    ingest[news-consumer-ingester]
+  end
 
-## Features
-- Consumes news articles from Confluent Kafka in configurable bulk batches
-- Fetches full article content via HTTP with BeautifulSoup parsing (skips social/video domains)
-- Falls back to RSS summary when full-content fetch fails
-- Bulk indexes articles into Elasticsearch with explicit `_id` to prevent duplicates
-- Retry with exponential backoff for transient ES failures
-- Manual Kafka offset commit — only after a batch is successfully indexed
-- Secrets loaded from HashiCorp Vault at startup (no plaintext credentials)
+  subgraph mcptier[MCP tier]
+    mcp1[es-mcp-server r1<br/>:8009]
+    mcp2[es-mcp-server r2<br/>:8009]
+  end
 
----
+  subgraph data[Data, messaging, secrets]
+    kafka[[Kafka<br/>kafka:9092]]
+    es[(Elasticsearch<br/>news_articles :9200)]
+    vault[(Vault :8200)]
+  end
 
-## Tech Stack
-- **Messaging:** Confluent Kafka (SASL_SSL)
-- **Search / Vector Store:** Elasticsearch Cloud (semantic text embeddings)
-- **HTTP client:** httpx + BeautifulSoup4
-- **Runtime:** Python 3.12, Uvicorn
-- **Secrets:** HashiCorp Vault
-- **Container:** Docker (multi-stage build)
+  sched -- "Kafka produce · news_ai_pipeline_dev_t_0" --> kafka
+  kafka -- "Kafka consume · news_ai_summary_group" --> ingest
+  ingest -- "HTTP(S) · fetch article content" --> sites
+  ingest -- "HTTP bulk index :9200" --> es
+  mcp1 -- "HTTP search · mget :9200" --> es
+  mcp2 -- "HTTP search · mget :9200" --> es
+  ingest -. "Vault read" .-> vault
 
----
-
-## End-to-End Pipeline
-
-```
-News Articles
-      ↓
-Kafka Producer  (news-fetch-scheduler)
-  • Dedup check via MD5 hash backed by PostgreSQL
-  • New articles pushed to Kafka topic
-      ↓
-Kafka Consumer  (this service — BulkMessageProcessor)
-  • poll_batch()  — up to batch_size messages per cycle
-  • Manual offset commit after successful indexing
-  • Handles partial last batch gracefully
-      ↓
-Content Fetcher  (content_feed.fetch_full_article)
-  • HTTP GET with User-Agent header
-  • Strips nav / footer / script noise via BeautifulSoup
-  • Caps content at 5 000 chars
-  • Falls back to Kafka-supplied summary on error
-      ↓
-Elasticsearch Ingester  (elastic_ingester.bulk_index_articles)
-  • Bulk indexing with explicit _id (idempotent)
-  • chunk_size matches Kafka batch size
-  • Retry with exponential backoff (initial 2s, max 60s, 3 retries)
-  • http_compress=True for cloud efficiency
-      ↓
-Elasticsearch Index  (news_articles)
-  • Strict mapping  (dynamic: strict)
-  • Semantic text field on content  (multilingual-e5-small)
-  • Optimised for hybrid keyword + vector search
+  classDef focus fill:#fde68a,stroke:#b45309,stroke-width:2px,color:#111;
+  class ingest focus;
 ```
 
----
+The ingester is the only application writer of `news_articles`: it turns the scheduler's Kafka messages into
+searchable documents that the es-mcp-server replicas read. Full system diagram:
+[docker_services architecture](../docker_services/README.md#architecture).
 
-## Elasticsearch Schema
+## Depends on / Depended on by
 
-The `news_articles` index uses a **strict dynamic mapping** to enforce data quality and enables **semantic search** via the Elasticsearch hosted 
-multilingual-e5-small model.
+| Direction | Component | How |
+|---|---|---|
+| Depends on | Vault (`vault-server:8200`) | Reads `secret/CREDENTIALS` at start-up; start fails without it. |
+| Depends on | Kafka (`kafka:9092`) | Consumes `news_ai_pipeline_dev_t_0` as group `news_ai_summary_group`. |
+| Depends on | news-fetch-scheduler | Producer of the messages (key = article id, value = Article JSON). |
+| Depends on | Elasticsearch (`elasticsearch:9200`) | Bulk indexing into `news_articles`, with API key auth. |
+| Depends on | Article websites (internet) | Full-text fetch; optional, falls back to summary. |
+| Depended on by | es-mcp-server r1/r2 | Read `news_articles` (search, mget). |
 
-### 1. Inference endpoint setup
+## Config & secrets
 
-```http
-PUT _ml/trained_models/.multilingual-e5-small_linux-x86_64
-{
-  "input": { "field_names": ["text_field"] }
-}
+**Environment variables** (set in `docker-compose.yml`):
 
-POST _ml/trained_models/.multilingual-e5-small_linux-x86_64/deployment/_start
-{
-  "number_of_allocations": 1,
-  "threads_per_allocation": 1
-}
+| Variable | Value in compose | Purpose |
+|---|---|---|
+| `VAULT_ADDR` | `http://vault-server:8200` | Vault URL. Required. |
+| `VAULT_TOKEN` | `${VAULT_TOKEN}` from your shell | Vault token. Required. |
+| `VAULT_SECRET_PATH` | `secret/CREDENTIALS` | KV v2 path(s) under mount `secret`; comma-separated list allowed. Required. |
+| `PYTHONPATH` | `src` | Import root. |
 
-PUT _inference/text_embedding/news-embedding-endpoint
-{
-  "service": "elasticsearch",
-  "service_settings": {
-    "model_id":        ".multilingual-e5-small_linux-x86_64",
-    "num_allocations": 1,
-    "num_threads":     1
-  }
-}
-```
+**Vault** (`config/vault_secrets.py`): reads every path in `VAULT_SECRET_PATH` and copies **all**
+keys found there into the process environment. Key this service uses:
 
-### 2. Index mapping
+| Key | Used by |
+|---|---|
+| `ELASTIC_API_KEY` | `config/elastic_setup.py` (`api_key=`); `RuntimeError("ELASTIC_API_KEY is not set")` if empty. The client is created lazily, so this error is raised during the first batch (after its content fetch), logged under `[Indexer] Bulk request failed`, not at start-up. |
 
-```http
-PUT news_articles
-{
-  "settings": {
-    "refresh_interval": "30s"
-  },
-  "mappings": {
-    "dynamic": "strict",
-    "properties": {
-      "article_id":   { "type": "keyword" },
-      "title":        { "type": "text", "analyzer": "english" },
-      "content": {
-        "type": "text",
-        "analyzer": "english",
-        "fields": {
-          "semantic": {
-            "type":         "semantic_text",
-            "inference_id": "news-embedding-endpoint"
-          }
-        }
-      },
-      "link":         { "type": "keyword", "index": false },
-      "published_at": {
-        "type":   "date",
-        "format": "strict_date_optional_time||epoch_millis"
-      },
-      "fetched_at": {
-        "type":   "date",
-        "format": "strict_date_optional_time||epoch_millis"
-      },
-      "source":       { "type": "keyword" }
-    }
-  }
-}
-```
+**Config files** (`src/resources/`):
 
-### 3. Field reference
+| File | Key | Purpose |
+|---|---|---|
+| `application_config.toml` | `KAFKA` | Passed as-is to `confluent_kafka.Consumer`: `bootstrap.servers=kafka:9092`, `security.protocol=PLAINTEXT`, `group.id=news_ai_summary_group`, `auto.offset.reset=latest`, `enable.auto.commit=false`, `session.timeout.ms` 45000, `heartbeat.interval.ms` 3000, `max.poll.interval.ms` 600000 (10 min; must exceed the worst-case batch, ≈ 374 s per the TOML comment), `socket.keepalive.enable`, `reconnect.backoff.ms` 1000, `reconnect.backoff.max.ms` 10000. |
+| | `TOPIC_NAME` | `news_ai_pipeline_dev_t_0` |
+| | `INGESTER_BATCH_SIZE` | 50; max messages per poll batch and per bulk call. |
+| | `POLL_TIMEOUT_SECONDS` | 1.0; per-poll wait. |
+| | `URL` | `http://elasticsearch:9200` |
+| | `ES_INDEX` | `news_articles` |
+| | `ELASTIC` | Client options: `request_timeout` 60, `retry_on_timeout`, `max_retries` 1, `http_compress`, `connections_per_node` 10. |
+| | `BULK` | `bulk()` options: `chunk_size` 50, `max_retries` 3, `initial_backoff` 2, `max_backoff` 60, `request_timeout` 60. |
+| | `INDEX_ERRORS` | `blocking_statuses` [401, 403, 404, 429] and `blocking_types` [`strict_dynamic_mapping_exception`, `index_not_found_exception`, `security_exception`, `cluster_block_exception`]; with any 5xx, these per-item errors block the commit. |
+| | `CONTENT_FEED` | `user_agent`, `timeout` 10, `max_content_chars` 5000, `max_workers` 8, `fetch_budget_seconds` 120, `ignore_domains` (youtube.com, twitter.com, facebook.com, instagram.com). |
+| `logging_config.json` | console + file handlers | Console and `/app/logs/news-consumer-ingester.log` (`TimedRotatingFileHandler`: rotated daily at midnight UTC, 14 days kept) at INFO; root DEBUG; `httpx`/`httpcore` at WARNING. |
+| `elastic_schema.MD` | — | Kibana console notes: inference endpoint, index mapping, reindex/alias, sample queries. Not read by code. |
+| `test-data.json` | — | Sample articles. Not referenced by `src/` or `tests/`. |
 
-| Field              | Type            | Notes                                               |
-|--------------------|-----------------|-----------------------------------------------------|
-| `article_id`       | `keyword`       | MD5 hash from producer — used as `_id` (dedup key)  |
-| `title`            | `text`          | English analyser for full-text search               |
-| `content`          | `text`          | English analyser + semantic sub-field for vectors   |
-| `content.semantic` | `semantic_text` | Auto-vectorised via inference endpoint              |
-| `link`             | `keyword`       | Not indexed — stored only                           |
-| `published_at`     | `date`          | ISO-8601 or epoch millis                            |
-| `fetched_at`       | `date`          | ISO-8601 or epoch millis                            |
-| `source`           | `keyword`       | Feed source name (e.g. ESPN, CBS News)              |
+There are no `.env` files; `.env` is in `.dockerignore`.
 
-> **Serverless note:** `number_of_shards` and `number_of_replicas` are not available in serverless mode — omit them from the settings block when targeting a serverless project.
+**Logs:** two copies. (1) The log file `~/github/logs/news-consumer-ingester.log` — the container's `/app/logs`, bind-mounted from `../logs` — rotated daily at midnight UTC with 14 days kept (`<name>.log.YYYY-MM-DD`). (2) The console output, which Docker keeps for `news_consumer_ingester` (`docker logs <container>`), rotated at 3 × 10 MB per container with the oldest file deleted automatically (`logging:` in `docker-compose.yml`). The docker_services log-collector deliberately skips this container, because the log file already exists; see `docker_services/README.md` (Logs).
 
----
+## Run locally
 
-## Installation
+Prerequisites: the docker_services stack is up in its start order (Vault unsealed, Kafka,
+Elasticsearch), the `news_articles` index exists with the mapping above, and the external networks
+`vault-network` and `services_network` exist.
 
-1. Clone the repo
-```bash
-git clone https://github.com/syedluri/news-consumer-ingester.git
-cd news-consumer-ingester
-```
-
-2. Install dependencies
-```bash
-pip install -r requirements.txt
-pip install -r requirements_locales.txt   # local private packages
-```
-
-3. Set up environment variables (injected via Vault in production)
-```bash
-export ELASTIC_URL=https://<your-cluster>.es.io:443
-export ELASTIC_API_KEY=<your-api-key>
-export CONFLUENT.bootstrap.servers=<broker>:9092
-export CONFLUENT.sasl.username=<key>
-export CONFLUENT.sasl.password=<secret>
-export CONFLUENT.client.id=news-consumer-ingester
-export VAULT_ADDR=http://localhost:8200
-export VAULT_TOKEN=<token>
-```
-
-4. Run the service
-```bash
-cd src && python main.py
-```
-
----
-
-## Running Tests
+**Docker (normal way):**
 
 ```bash
-pytest --cov=src --cov-report=term-missing
+export VAULT_TOKEN=...            # your Vault token
+docker compose up -d --build      # container: news_consumer_ingester
+docker logs -f news_consumer_ingester
 ```
 
-Tests are in `tests/` and mirror the `src/` module structure with `_test` suffix:
+The image is a two-stage build (`uv sync --frozen --no-dev` in the builder, runtime as non-root
+`appuser`). `CMD ["python", "src/main.py"]`. Logs are also written to `../logs` on the host
+(bind mount to `/app/logs`).
 
-```
-tests/
-├── config/
-│   ├── confluent_config_test.py
-│   ├── elastic_setup_test.py
-│   └── settings_test.py
-├── consumer/
-│   └── bulk_message_processor_test.py
-├── contentfeed/
-│   └── content_feed_test.py
-└── ingester/
-    └── elastic_ingester_test.py
-```
+Health check: every 60s (start period 60s, 3 retries) the container is healthy while
+`/tmp/heartbeat` is less than 600s old, in step with `max.poll.interval.ms` (600000). The worst-case
+batch is ≈ 614 s, and only when Elasticsearch both stalls and throttles: content fetch budget 120 s +
+4 bulk-helper rounds for 429s (`BULK.max_retries` 3) × 2 client attempts per round (`ELASTIC.max_retries` 1)
+× `request_timeout` 60 s + backoff 14 s. A normal batch takes seconds.
 
----
-
-## Environment Variables
-
-| Variable                        | Description                          | Required |
-|---------------------------------|--------------------------------------|----------|
-| `ELASTIC_URL`                   | Elasticsearch cluster URL            | Yes      |
-| `ELASTIC_API_KEY`               | Elasticsearch API key                | Yes      |
-| `CONFLUENT.bootstrap.servers`   | Kafka broker address                 | Yes      |
-| `CONFLUENT.sasl.username`       | Confluent API key                    | Yes      |
-| `CONFLUENT.sasl.password`       | Confluent API secret                 | Yes      |
-| `CONFLUENT.client.id`           | Kafka client identifier              | Yes      |
-| `VAULT_ADDR`                    | HashiCorp Vault server URL           | Yes      |
-| `VAULT_TOKEN`                   | Vault auth token                     | Yes      |
-| `VAULT_SECRET_PATH`             | Path to secrets in Vault             | Yes      |
-
----
-
-## Key Design Decisions
-
-| Problem                        | Solution                                                     |
-|--------------------------------|--------------------------------------------------------------|
-| Duplicate articles             | Explicit `_id` from MD5 hash — ES `index` op is idempotent   |
-| Partial Kafka batches          | `batch_size` threshold with graceful last-batch handling     |
-| ES certificate errors          | Separate HTTP/transport certs with SANs                      |
-| Cloud connection timeouts      | `http_compress=True`, dynamic `chunk_size`, retry backoff    |
-| Large article content          | HTTP fetch capped at 5 000 chars; BeautifulSoup noise strip  |
-| Secrets management             | HashiCorp Vault — no plaintext credentials in config         |
-
----
-
-## Docker
+**On the host (without Docker):**
 
 ```bash
-# Build and run
-docker compose up --build
-
-# Production image only
-docker build -t news-consumer-ingester .
-docker run --env-file .env news-consumer-ingester
+uv sync
+export VAULT_ADDR=http://vault-server:8200   # host name mapped to 127.0.0.1 in /etc/hosts
+export VAULT_TOKEN=...
+export VAULT_SECRET_PATH=secret/CREDENTIALS
+uv run python src/main.py
 ```
 
----
+Caveats from the config: the host name `vault-server` must resolve on the host (e.g. `/etc/hosts`).
+`kafka:9092` is the in-network listener; the Kafka container publishes
+only `localhost:29092` to the host, so a host run needs a local, uncommitted edit of
+`KAFKA."bootstrap.servers"` in `application_config.toml`. Elasticsearch is published on
+`127.0.0.1:9200`. If `/app/logs` does not exist, logging falls back to console-only and logs
+`Failed to load application logging`.
 
-## Contributing
+## Test
 
-Not yet open for contributions.
+```bash
+uv sync                      # includes the dev group (pytest, pytest-mock, pytest-cov, mypy)
+uv run pytest                # 88 tests, coverage 98% (gate: 90%)
+uv run mypy --strict src
+```
 
----
+`pytest.ini` adds `--cov=src --cov-report=term-missing --cov-report=html:coverage-report`, so each
+run writes `coverage-report/` (`src/main.py` is omitted via `.coveragerc`). `tests/conftest.py`
+loads the real `application_config.toml` for every test; Kafka, Elasticsearch and HTTP are mocked.
+Tests mirror `src/` with a `_test.py` suffix. Coverage settings live in `.coveragerc` (it takes precedence over `pyproject.toml`): `include_namespace_packages` so untested modules still count, `fail_under = 90`, and `src/main.py` omitted (it is still tested, in `tests/config/startup_and_config_test.py`).
 
-## License
+## Ports
 
-Distributed under the MIT License.
+None published, and it serves no HTTP (no listener, no `ports:` in compose). Outbound only:
 
----
+| Target | Address | Purpose |
+|---|---|---|
+| Kafka | `kafka:9092` (PLAINTEXT) | Consume articles, commit offsets |
+| Elasticsearch | `elasticsearch:9200` (HTTP, API key) | Bulk index |
+| Vault | `vault-server:8200` | Secrets at start-up |
+| Article websites | HTTP 80 / HTTPS 443 | Full-text fetch |
 
-## Author
+## Troubleshooting
 
-**Srini Yedluri** — yedlurisrinu@gmail.com
+| Symptom (log line) | Cause | Fix |
+|---|---|---|
+| `ValueError: VAULT_ADDR and VAULT_TOKEN must be set` / `VAULT_SECRET_PATH must be set` | Env var missing. | `export VAULT_TOKEN` before `docker compose up`; set the others for host runs. |
+| `Vault authentication failed - check token information...` | Token invalid or expired. | Use a valid token. |
+| Traceback at start-up from `client.is_authenticated()` (e.g. `hvac.exceptions.VaultDown`, `requests.exceptions.ConnectionError`); container restart loop | Vault sealed or unreachable. The check runs outside the `try`, so the error is not wrapped. | Start and unseal Vault; check `vault-server` is on `vault-network`. |
+| `Exception while reading secrets from vault :- <error>` | The secret path is missing or unreadable (e.g. `InvalidPath`, `Forbidden`). | Check `VAULT_SECRET_PATH=secret/CREDENTIALS` and the token's policy. |
+| `[Indexer] Bulk request failed` with `RuntimeError: ELASTIC_API_KEY is not set` during the first batch; container restarts | Key missing at the Vault path. | Add `ELASTIC_API_KEY` to `secret/CREDENTIALS`. Offsets were not committed, so the batch is re-read. |
+| `[Indexer] Bulk request failed` then the process exits and restarts (`restart: unless-stopped`) | Elasticsearch down, unreachable or rejecting the key. | Check `elasticsearch` is up and the key is valid. The batch is re-consumed from the last commit; `_id` makes re-indexing safe. |
+| `[Indexer] Failed to index _id=... status=400 error_type=strict_dynamic_mapping_exception` (or `document_parsing_exception`) | Document does not fit the strict mapping (e.g. index created without the mapping, or bad date). | `strict_dynamic_mapping_exception` is blocking (see `INDEX_ERRORS`): the batch is not committed and is retried after each restart until the mapping is fixed. `document_parsing_exception` (status 400) is document-level: that document is committed past and skipped for good; re-publish it to re-index. |
+| Scheduler publishes but nothing is indexed, no errors | `auto.offset.reset=latest`: a new consumer group (or expired offsets) starts at the end of the topic and skips older messages. | Expected for a fresh group; reset the group's offsets with Kafka tools if a backfill is needed. |
+| `Skipping Kafka message with no key or value ...` / `... not valid UTF-8 ...` / `... invalid JSON ...` | Message not produced by the scheduler format. | None needed; the message is skipped (no crash loop) and committed with the batch, or immediately if every message in the poll was skipped. |
+| `Skipping Kafka message missing fields [...]` / `... not a JSON object` | The message lacks a field the ingester reads (`title`, `summary`, `link`, `published_at`, `fetched_at`, `source`) or isn't a JSON object. It is skipped (logged with partition and offset, no payload) and its offset is committed with the batch (or immediately if every message in the poll was skipped). | Fix the producer; null values are accepted, only missing keys are skipped. |
+| Restart loop with `[Indexer] N of M index errors are systematic/transient (e.g. status=... error_type=...); not committing` and `BatchRejected` | At least one per-item error is blocking (`INDEX_ERRORS`: status 401/403/404/429 or 5xx, or type `strict_dynamic_mapping_exception`, `index_not_found_exception`, `security_exception`, `cluster_block_exception`): e.g. the strict mapping no longer matches what the scheduler sends, a missing index, an API key without write rights, a read-only cluster, or overload. Offsets are not committed, so nothing is lost; the batch is retried after each restart. Document-level errors are still logged and committed past. | Check the `[Indexer] Failed to index ... error_type=` lines, fix the mapping, index or key, and the ingester catches up on its own. |
+| `Kafka non-fatal error on partition ...` | Retriable broker error or partition EOF. | Usually transient; check Kafka if it repeats. |
+| `[Article Fetcher] Failed to fetch <url>: ...` | Site blocked the client, timed out, or returned an error status. | None needed; the summary is indexed instead. |
+| `[Article Fetcher] Fetch budget exceeded, N articles fall back to summary` | Fetching the batch took longer than `fetch_budget_seconds`. | Raise `fetch_budget_seconds` or `max_workers` in `CONTENT_FEED`. |
+| Container `unhealthy` | `/tmp/heartbeat` older than 600s: one batch (fetch + bulk with retries; worst case ≈ 614 s) took over 10 minutes, or the process hung. Beyond `max.poll.interval.ms` (10 min) the consumer also leaves the group. | `docker logs news_consumer_ingester`; restart the container. |
+| `Failed to load application logging` | `/app/logs` missing or not writable (host run). | Create the directory, or ignore: console logging still works. |

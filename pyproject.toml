@@ -1,0 +1,43 @@
+[project]
+name = "news-consumer-ingester"
+version = "0.1.0"
+description = "Kafka consumer that fetches full article content and bulk-indexes it into Elasticsearch"
+requires-python = ">=3.12"
+dependencies = [
+    "beautifulsoup4==4.15.0",
+    "confluent-kafka==2.16.0",
+    "elasticsearch==9.5.1",
+    "httpx==0.27.1",
+    "hvac==2.4.0",
+]
+
+[dependency-groups]
+dev = [
+    "mypy==2.4.0",
+    "pytest==8.0.0",
+    "pytest-cov==4.1.0",
+    "pytest-mock==3.12.0",
+    "ruff==0.16.8",
+]
+
+[tool.mypy]
+python_version = "3.12"
+mypy_path = "src"
+explicit_package_bases = true
+namespace_packages = true
+warn_unused_ignores = true
+
+# Untyped third-party packages only (no py.typed, no stub package).
+# Never set ignore_missing_imports globally: it hides missing first-party modules.
+[[tool.mypy.overrides]]
+module = ["hvac", "hvac.*"]
+ignore_missing_imports = true
+
+[tool.ruff]
+# No rule selection: the rules are ruff's defaults for the pinned version (ruff==0.16.8 in the dev
+# group), so they only change when that pin is bumped.
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.uv]
+package = true
