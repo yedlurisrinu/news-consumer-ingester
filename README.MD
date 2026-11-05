@@ -183,14 +183,14 @@ only `localhost:29092` to the host, so a host run needs a local, uncommitted edi
 
 ```bash
 uv sync                      # includes the dev group (pytest, pytest-mock, pytest-cov, mypy)
-uv run pytest                # 63 tests
+uv run pytest                # 88 tests, coverage 98% (gate: 90%)
 uv run mypy --strict src
 ```
 
 `pytest.ini` adds `--cov=src --cov-report=term-missing --cov-report=html:coverage-report`, so each
 run writes `coverage-report/` (`src/main.py` is omitted via `.coveragerc`). `tests/conftest.py`
 loads the real `application_config.toml` for every test; Kafka, Elasticsearch and HTTP are mocked.
-Tests mirror `src/` with a `_test.py` suffix.
+Tests mirror `src/` with a `_test.py` suffix. Coverage settings live in `.coveragerc` (it takes precedence over `pyproject.toml`): `include_namespace_packages` so untested modules still count, `fail_under = 90`, and `src/main.py` omitted (it is still tested, in `tests/config/startup_and_config_test.py`).
 
 ## Ports
 

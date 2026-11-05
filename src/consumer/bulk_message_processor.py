@@ -1,13 +1,14 @@
 import json
+import logging
 import signal
 from pathlib import Path
 from types import FrameType
 from typing import Any
 
 from confluent_kafka import Consumer, KafkaError, KafkaException
-import logging
-from ingester import elastic_ingester
+
 from config.application_config import get_config
+from ingester import elastic_ingester
 
 logger = logging.getLogger(__name__)
 
@@ -18,14 +19,15 @@ HEARTBEAT_FILE = "/tmp/heartbeat"
 # null; a missing key would raise later and the batch would never commit, so skip it here.
 REQUIRED_FIELDS = ("title", "summary", "link", "published_at", "fetched_at", "source")
 
+
 class BulkMessageProcessor:
     def __init__(self, topic: str, batch_size: int = 100) -> None:
         self.batch_size = batch_size
-        self.poll_timeout = float(get_config('POLL_TIMEOUT_SECONDS'))
+        self.poll_timeout = float(get_config("POLL_TIMEOUT_SECONDS"))
         self._stop = False
         # messages taken off Kafka by the last poll_batch(), including skipped ones
         self.last_poll_consumed = 0
-        self.consumer = Consumer(**get_config('KAFKA'))
+        self.consumer = Consumer(**get_config("KAFKA"))
         self.consumer.subscribe([topic])
 
     def poll_batch(self) -> list[dict[str, Any]]:
@@ -39,34 +41,46 @@ class BulkMessageProcessor:
             error = msg.error()
             if error:
                 if error.code() == KafkaError._PARTITION_EOF or error.retriable():
-                    logger.warning(f"Kafka non-fatal error on partition {msg.partition()}: {error}")
+                    logger.warning(
+                        f"Kafka non-fatal error on partition {msg.partition()}: {error}"
+                    )
                     continue
                 raise KafkaException(error)
-            logger.info(f' Processed Offset : {msg.offset()}')
+            logger.info(f" Processed Offset : {msg.offset()}")
             self.last_poll_consumed += 1
             raw_key, raw_value = msg.key(), msg.value()
             if raw_key is None or raw_value is None:
-                logger.error(f"Skipping Kafka message with no key or value at partition {msg.partition()} offset {msg.offset()}")
+                logger.error(
+                    f"Skipping Kafka message with no key or value at partition {msg.partition()} offset {msg.offset()}"
+                )
                 continue
             try:
                 key = raw_key.decode("utf-8")
                 value = raw_value.decode("utf-8")
             except UnicodeDecodeError:
-                logger.error(f"Skipping Kafka message that is not valid UTF-8 at partition {msg.partition()} offset {msg.offset()}")
+                logger.error(
+                    f"Skipping Kafka message that is not valid UTF-8 at partition {msg.partition()} offset {msg.offset()}"
+                )
                 continue
             try:
                 article = json.loads(value)
             except json.JSONDecodeError:
-                logger.error(f"Skipping Kafka message with invalid JSON at partition {msg.partition()} offset {msg.offset()}")
+                logger.error(
+                    f"Skipping Kafka message with invalid JSON at partition {msg.partition()} offset {msg.offset()}"
+                )
                 continue
             if not isinstance(article, dict):
-                logger.error(f"Skipping Kafka message that is not a JSON object at partition {msg.partition()} offset {msg.offset()}")
+                logger.error(
+                    f"Skipping Kafka message that is not a JSON object at partition {msg.partition()} offset {msg.offset()}"
+                )
                 continue
             missing = [field for field in REQUIRED_FIELDS if field not in article]
             if missing:
-                logger.error(f"Skipping Kafka message missing fields {missing} at partition {msg.partition()} offset {msg.offset()}")
+                logger.error(
+                    f"Skipping Kafka message missing fields {missing} at partition {msg.partition()} offset {msg.offset()}"
+                )
                 continue
-            article['article_id'] = key
+            article["article_id"] = key
             batch.append(article)
         return batch
 
@@ -94,7 +108,9 @@ class BulkMessageProcessor:
                     if self.last_poll_consumed:
                         # every message in this poll was skipped: commit past them so they are not re-read
                         self.consumer.commit(asynchronous=False)
-                        logger.info(f"Committed past {self.last_poll_consumed} skipped messages")
+                        logger.info(
+                            f"Committed past {self.last_poll_consumed} skipped messages"
+                        )
                     continue
 
                 # Step 2 — Process batch

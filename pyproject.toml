@@ -17,6 +17,7 @@ dev = [
     "pytest==8.0.0",
     "pytest-cov==4.1.0",
     "pytest-mock==3.12.0",
+    "ruff==0.16.8",
 ]
 
 [tool.mypy]
@@ -31,6 +32,12 @@ warn_unused_ignores = true
 [[tool.mypy.overrides]]
 module = ["hvac", "hvac.*"]
 ignore_missing_imports = true
+
+[tool.ruff]
+# No rule selection: the rules are ruff's defaults for the pinned version (ruff==0.16.8 in the dev
+# group), so they only change when that pin is bumped.
+target-version = "py312"
+src = ["src", "tests"]
 
 [tool.uv]
 package = true

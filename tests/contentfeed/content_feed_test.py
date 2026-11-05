@@ -1,23 +1,28 @@
 """
 Unit tests for src/contentfeed/content_feed.py
 """
-import pytest
-from unittest.mock import patch, MagicMock
+
+from unittest.mock import MagicMock, patch
+
 import httpx
+import pytest
 
 from config.application_config import get_config
-from contentfeed.content_feed import fetch_full_article, _http_client
+from contentfeed.content_feed import _http_client, fetch_full_article
 
 
 class TestFetchFullArticle:
     # ── Ignored domains ────────────────────────────────────────────────────
 
-    @pytest.mark.parametrize("url", [
-        "https://www.youtube.com/watch?v=abc123",
-        "https://twitter.com/user/status/123",
-        "https://www.facebook.com/story/456",
-        "https://www.instagram.com/p/xyz",
-    ])
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://www.youtube.com/watch?v=abc123",
+            "https://twitter.com/user/status/123",
+            "https://www.facebook.com/story/456",
+            "https://www.instagram.com/p/xyz",
+        ],
+    )
     def test_returns_empty_string_for_ignored_domains(self, url):
         result = fetch_full_article(url)
         assert result == ""
@@ -36,7 +41,10 @@ class TestFetchFullArticle:
         mock_resp.text = html
         mock_resp.raise_for_status = MagicMock()
 
-        with patch("contentfeed.content_feed._http_client", return_value=MagicMock(get=MagicMock(return_value=mock_resp))):
+        with patch(
+            "contentfeed.content_feed._http_client",
+            return_value=MagicMock(get=MagicMock(return_value=mock_resp)),
+        ):
             result = fetch_full_article("https://example.com/news/ai")
 
         assert "full article content about AI news" in result
@@ -51,7 +59,10 @@ class TestFetchFullArticle:
         mock_resp.text = html
         mock_resp.raise_for_status = MagicMock()
 
-        with patch("contentfeed.content_feed._http_client", return_value=MagicMock(get=MagicMock(return_value=mock_resp))):
+        with patch(
+            "contentfeed.content_feed._http_client",
+            return_value=MagicMock(get=MagicMock(return_value=mock_resp)),
+        ):
             result = fetch_full_article("https://example.com/story")
 
         assert "Main section content" in result
@@ -62,7 +73,10 @@ class TestFetchFullArticle:
         mock_resp.text = html
         mock_resp.raise_for_status = MagicMock()
 
-        with patch("contentfeed.content_feed._http_client", return_value=MagicMock(get=MagicMock(return_value=mock_resp))):
+        with patch(
+            "contentfeed.content_feed._http_client",
+            return_value=MagicMock(get=MagicMock(return_value=mock_resp)),
+        ):
             result = fetch_full_article("https://example.com/page")
 
         assert "Body content here" in result
@@ -80,7 +94,10 @@ class TestFetchFullArticle:
         mock_resp.text = html
         mock_resp.raise_for_status = MagicMock()
 
-        with patch("contentfeed.content_feed._http_client", return_value=MagicMock(get=MagicMock(return_value=mock_resp))):
+        with patch(
+            "contentfeed.content_feed._http_client",
+            return_value=MagicMock(get=MagicMock(return_value=mock_resp)),
+        ):
             result = fetch_full_article("https://example.com/news")
 
         assert "Navigation bar" not in result
@@ -95,7 +112,10 @@ class TestFetchFullArticle:
         mock_resp.text = html
         mock_resp.raise_for_status = MagicMock()
 
-        with patch("contentfeed.content_feed._http_client", return_value=MagicMock(get=MagicMock(return_value=mock_resp))):
+        with patch(
+            "contentfeed.content_feed._http_client",
+            return_value=MagicMock(get=MagicMock(return_value=mock_resp)),
+        ):
             result = fetch_full_article("https://example.com/long-article")
 
         assert len(result) <= 5000
@@ -103,30 +123,52 @@ class TestFetchFullArticle:
     # ── Error handling ──────────────────────────────────────────────────────
 
     def test_returns_empty_string_on_http_error(self):
-        with patch("contentfeed.content_feed._http_client",
-                   return_value=MagicMock(get=MagicMock(side_effect=httpx.HTTPStatusError("404", request=MagicMock(), response=MagicMock())))):
+        with patch(
+            "contentfeed.content_feed._http_client",
+            return_value=MagicMock(
+                get=MagicMock(
+                    side_effect=httpx.HTTPStatusError(
+                        "404", request=MagicMock(), response=MagicMock()
+                    )
+                )
+            ),
+        ):
             result = fetch_full_article("https://example.com/missing")
 
         assert result == ""
 
     def test_returns_empty_string_on_timeout(self):
-        with patch("contentfeed.content_feed._http_client",
-                   return_value=MagicMock(get=MagicMock(side_effect=httpx.TimeoutException("timeout")))):
+        with patch(
+            "contentfeed.content_feed._http_client",
+            return_value=MagicMock(
+                get=MagicMock(side_effect=httpx.TimeoutException("timeout"))
+            ),
+        ):
             result = fetch_full_article("https://example.com/slow")
 
         assert result == ""
 
     def test_returns_empty_string_on_connection_error(self):
-        with patch("contentfeed.content_feed._http_client",
-                   return_value=MagicMock(get=MagicMock(side_effect=httpx.ConnectError("connection refused")))):
+        with patch(
+            "contentfeed.content_feed._http_client",
+            return_value=MagicMock(
+                get=MagicMock(side_effect=httpx.ConnectError("connection refused"))
+            ),
+        ):
             result = fetch_full_article("https://example.com/unreachable")
 
         assert result == ""
 
     def test_logs_error_on_exception(self):
-        with patch("contentfeed.content_feed._http_client",
-                   return_value=MagicMock(get=MagicMock(side_effect=Exception("unexpected error")))), \
-             patch("contentfeed.content_feed.logger") as mock_logger:
+        with (
+            patch(
+                "contentfeed.content_feed._http_client",
+                return_value=MagicMock(
+                    get=MagicMock(side_effect=Exception("unexpected error"))
+                ),
+            ),
+            patch("contentfeed.content_feed.logger") as mock_logger,
+        ):
             fetch_full_article("https://example.com/fail")
             mock_logger.error.assert_called_once()
 
