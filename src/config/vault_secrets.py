@@ -5,7 +5,7 @@ from hvac import Client
 logger = logging.getLogger(__name__)
 
 
-def load_secrets():
+def load_secrets() -> None:
     """
     Load secrets from Vault into environment variables.
     Works consistently in Local, Docker, and GitHub Actions and more secure to handle secrets
@@ -31,18 +31,18 @@ def load_secrets():
     if not secret_path:
         raise ValueError("VAULT_SECRET_PATH must be set.")
 
+    # Connect to vault
+    client = Client(url=vault_address, token=vault_token)
+
+    if not client.is_authenticated():
+        logger.error(
+            "Vault authentication failed - check token information for VAULT_TOKEN variable"
+        )
+        raise ValueError(
+            "Vault authentication failed - check token information for VAULT_TOKEN variable"
+        )
+
     try:
-        # Connect to vault
-        client = Client(url=vault_address, token=vault_token)
-
-        if not client.is_authenticated():
-            logger.error(
-                "Vault authentication failed - check token information for VAULT_TOKEN variable"
-            )
-            raise ValueError(
-                "Vault authentication failed - check token information for VAULT_TOKEN variable"
-            )
-
         paths = secret_path.split(",")
         for path in paths:
             # Read all secrets from vault
@@ -59,4 +59,6 @@ def load_secrets():
         logger.error(
             f"Exception while reading secrets from vault :- {e}", exc_info=True
         )
-        raise ValueError(f"Exception while reading secrets from vault :- {e}")
+        raise ValueError(
+            f"Exception while reading secrets from vault :- {type(e).__name__}"
+        ) from e

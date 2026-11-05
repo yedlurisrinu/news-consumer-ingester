@@ -17,3 +17,8 @@ start.sh
 README.md
 .github/
 .venv
+**/__pycache__
+**/*.py[co]
+**/*.egg-info
+demo/
+*.MD

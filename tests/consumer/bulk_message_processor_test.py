@@ -42,7 +42,8 @@ def mock_consumer():
 
 
 @pytest.fixture()
-def processor(mock_consumer, monkeypatch):
+def processor(mock_consumer, monkeypatch, tmp_path):
+    monkeypatch.setattr("consumer.bulk_message_processor.HEARTBEAT_FILE", str(tmp_path / "heartbeat"))
     monkeypatch.setenv("CONFLUENT.bootstrap.servers", "localhost:9092")
     monkeypatch.setenv("CONFLUENT.sasl.username", "user")
     monkeypatch.setenv("CONFLUENT.sasl.password", "pass")
@@ -50,8 +51,9 @@ def processor(mock_consumer, monkeypatch):
 
     _, consumer_instance = mock_consumer
     with patch('consumer.bulk_message_processor.get_config') as mock_config:
-        mock_config.return_value = {'security.protocol': 'PLAINTEXT', 'bootstrap.servers': 'kafka:9092', 'group.id': 'news_ai_summary_group', 'auto.offset.reset': 'latest', 'enable.auto.commit': 'False', 
-                                    'session.timeout.ms': 45000, 'heartbeat.interval.ms': 3000, 'max.poll.interval.ms': 300000, 'socket.keepalive.enable': 'True', 'reconnect.backoff.ms': 1000, 'reconnect.backoff.max.ms': 10000}
+        mock_config.side_effect = {'KAFKA': {'security.protocol': 'PLAINTEXT', 'bootstrap.servers': 'kafka:9092', 'group.id': 'news_ai_summary_group', 'auto.offset.reset': 'latest', 'enable.auto.commit': False,
+                                    'session.timeout.ms': 45000, 'heartbeat.interval.ms': 3000, 'max.poll.interval.ms': 300000, 'socket.keepalive.enable': True, 'reconnect.backoff.ms': 1000, 'reconnect.backoff.max.ms': 10000},
+                                   'POLL_TIMEOUT_SECONDS': 1.0}.get
         proc = BulkMessageProcessor("test-topic", batch_size=3)
     return proc, consumer_instance
 
@@ -90,6 +92,37 @@ class TestPollBatch:
 
         assert len(batch) == 1
 
+    def test_skips_message_missing_required_fields(self, processor):
+        proc, consumer_instance = processor
+        incomplete = {k: v for k, v in SAMPLE_ARTICLE.items() if k not in ("link", "summary")}
+        consumer_instance.poll.side_effect = [
+            _make_message("bad", incomplete, 7),
+            _make_message("good", SAMPLE_ARTICLE, 8),
+            None,
+        ]
+
+        with patch("consumer.bulk_message_processor.logger") as logger:
+            batch = proc.poll_batch()
+
+        assert [a["article_id"] for a in batch] == ["good"]
+        message = logger.error.call_args[0][0]
+        assert "['summary', 'link']" in message and "offset 7" in message
+        assert "Test Article" not in message  # no payload in the log line
+
+    def test_null_values_are_accepted(self, processor):
+        proc, consumer_instance = processor
+        consumer_instance.poll.side_effect = [_make_message("id-0", {**SAMPLE_ARTICLE, "link": None}), None]
+
+        assert proc.poll_batch()[0]["link"] is None
+
+    def test_skips_json_that_is_not_an_object(self, processor):
+        proc, consumer_instance = processor
+        msg = _make_message("id-0", SAMPLE_ARTICLE)
+        msg.value.return_value = b'["not", "an", "object"]'
+        consumer_instance.poll.side_effect = [msg, None]
+
+        assert proc.poll_batch() == []
+
     def test_attaches_article_id_from_key(self, processor):
         proc, consumer_instance = processor
         consumer_instance.poll.side_effect = [
@@ -115,6 +148,7 @@ class TestPollBatch:
         proc, consumer_instance = processor
         error_msg = MagicMock()
         error_msg.error.return_value = MagicMock()  # truthy error
+        error_msg.error.return_value.retriable.return_value = False  # fatal error
         consumer_instance.poll.return_value = error_msg
 
         with pytest.raises(KafkaException):
@@ -144,6 +178,53 @@ class TestRun:
         mock_ingester.bulk_index_articles.assert_called_once()
         consumer_instance.commit.assert_called_with(asynchronous=False)
 
+    def test_skips_non_utf8_message_without_logging_payload(self, processor):
+        proc, consumer_instance = processor
+        bad = _make_message("bad", SAMPLE_ARTICLE, 5)
+        bad.value.return_value = b"\xff\xfe not utf-8"
+        consumer_instance.poll.side_effect = [bad, _make_message("good", SAMPLE_ARTICLE, 6), None]
+
+        with patch("consumer.bulk_message_processor.logger") as logger:
+            batch = proc.poll_batch()
+
+        assert [a["article_id"] for a in batch] == ["good"]
+        message = logger.error.call_args[0][0]
+        assert "not valid UTF-8" in message and "offset 5" in message and "not utf-8" not in message
+        assert proc.last_poll_consumed == 2
+
+    def test_all_skipped_poll_is_committed(self, processor):
+        proc, consumer_instance = processor
+        bad = _make_message("bad", SAMPLE_ARTICLE)
+        bad.value.return_value = b"not json"
+        consumer_instance.poll.side_effect = [bad, None, KeyboardInterrupt()]
+
+        with patch("consumer.bulk_message_processor.elastic_ingester") as mock_ingester:
+            proc.run()
+
+        mock_ingester.bulk_index_articles.assert_not_called()
+        consumer_instance.commit.assert_called_once_with(asynchronous=False)
+
+    def test_failed_indexing_is_never_committed(self, processor):
+        proc, consumer_instance = processor
+        consumer_instance.poll.side_effect = [_make_message("id-0", SAMPLE_ARTICLE), None]
+
+        with patch("consumer.bulk_message_processor.elastic_ingester") as mock_ingester:
+            mock_ingester.bulk_index_articles.side_effect = RuntimeError("elasticsearch down")
+            with pytest.raises(RuntimeError):
+                proc.run()
+
+        consumer_instance.commit.assert_not_called()
+        consumer_instance.close.assert_called_once()
+
+    def test_empty_poll_is_not_committed(self, processor):
+        proc, consumer_instance = processor
+        consumer_instance.poll.side_effect = [None, KeyboardInterrupt()]
+
+        with patch("consumer.bulk_message_processor.elastic_ingester"):
+            proc.run()
+
+        consumer_instance.commit.assert_not_called()
+
     def test_skips_empty_batch(self, processor):
         proc, consumer_instance = processor
         # First poll returns None (empty batch), second raises KeyboardInterrupt
@@ -154,14 +235,14 @@ class TestRun:
 
         mock_ingester.bulk_index_articles.assert_not_called()
 
-    def test_commits_and_closes_on_keyboard_interrupt(self, processor):
+    def test_closes_without_commit_on_keyboard_interrupt(self, processor):
         proc, consumer_instance = processor
         consumer_instance.poll.side_effect = KeyboardInterrupt()
 
         with patch("consumer.bulk_message_processor.elastic_ingester"):
             proc.run()
 
-        consumer_instance.commit.assert_called_with(asynchronous=False)
+        consumer_instance.commit.assert_not_called()
         consumer_instance.close.assert_called_once()
 
     def test_closes_consumer_in_finally(self, processor):

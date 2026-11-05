@@ -1,5 +1,5 @@
 # ── Stage 1: Builder ──────────────────────────────────────
-FROM python:3.12-slim AS builder
+FROM python:3.12.16-slim AS builder
 
 WORKDIR /app
 
@@ -21,21 +21,13 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 # ── Stage 2: Runtime ──────────────────────────────────────
-FROM python:3.12-slim AS runtime
+FROM python:3.12.16-slim AS runtime
 
 WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv
 ENV PATH="/app/.venv/bin:$PATH"
 
 COPY src/ ./src/
-
-# Copy installed packages from builder
-COPY --from=builder /usr/local/lib/python3.12/site-packages \
-                    /usr/local/lib/python3.12/site-packages
-COPY --from=builder /usr/local/bin /usr/local/bin
-
-# Copy source code and static files
-COPY . .
 
 # Set PYTHONPATH so imports resolve cleanly
 ENV PYTHONPATH=src
@@ -47,6 +39,8 @@ RUN mkdir -p /app/logs && chown -R appuser:appuser /app/logs
 
 USER appuser
 
-# Run with Gunicorn + Uvicorn workers for production
-CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8007", "--log-level", "info"]
+# Healthy while the poll loop keeps touching the heartbeat file (mtime < 5 min)
+HEALTHCHECK --interval=60s --timeout=10s --start-period=60s --retries=3 \
+    CMD ["python", "-c", "import os, sys, time; sys.exit(0 if time.time() - os.path.getmtime('/tmp/heartbeat') < 600 else 1)"]
 
+CMD ["python", "src/main.py"]

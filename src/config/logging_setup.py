@@ -1,6 +1,5 @@
 from pathlib import Path
 
-# Start scheduler
 import json
 import logging
 import logging.config
@@ -8,12 +7,12 @@ import logging.config
 logger = logging.getLogger(__name__)
 
 
-def setup_logging(config_file="logging_config.json"):
+def setup_logging(config_file: str = "logging_config.json") -> None:
     """Loads the logging configuration."""
     logger.info("Logging configuration starting.")
-    path = str(Path(__name__).parent.parent)
+    path = str(Path(__file__).parent.parent)
     try:
-        with open(path + "/" + config_file) as file_handler:
+        with open(path + "/resources/" + config_file) as file_handler:
             config = json.load(file_handler)
         logging.config.dictConfig(config)
     except Exception as fe:
